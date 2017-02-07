@@ -13,8 +13,8 @@
                      :root (ui/stack-pane
                              :children [(ui/button
                                           :text "Say 'Hello World'"
-                                          :on-action {:say "Hello World!"}
-                                          )])))
+                                          :on-action {:say "Hello World!"})])))
+
         handler-fn (fn [evt]
                      (println "Received Event: " evt))]
     (dom/app u handler-fn)))
