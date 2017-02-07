@@ -9,7 +9,7 @@
                  [proto-repl "0.3.1"]]
   :source-paths ["dev" "src"]
   ;:main my-trys.scene-graph-demo
-  ;:aot [getting-started.01-hello-world]
+  ;:aot [fn-fx-ui.javafx-init]
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}}
   ;:repl-options {:init-ns my-trys.scene-graph-demo}
