@@ -1,6 +1,9 @@
 (ns my-trys.scene-graph-demo
   (:require [fn-fx.fx-dom :as dom]
-            [fn-fx.controls :as ui])
+            [fn-fx.controls :as ui]
+            [fn-fx.diff :refer [component defui render]]
+            [fn-fx.controls :as controls]
+            [fn-fx.fx-dom :as fx-dom])
   (:import [javafx.animation TranslateTransition ParallelTransition Timeline]
            [javafx.util Duration]))
 
@@ -45,7 +48,64 @@
 
 ;(def transition (ui/parallel-transition r translate))
 
-(defn -main []
+(defui TestControl
+       (render [this {:keys [button-text] :as state}]
+               (controls/border-pane
+                 :top (controls/h-box
+                        :padding (javafx.geometry.Insets. 15 12 15 12)
+                        :spacing 10
+                        :alignment (javafx.geometry.Pos/CENTER)
+                        :children [(controls/button
+                                     :text button-text
+                                     :on-action {:event :press-button
+                                                 :fn-fx/include {:fn-fx/event #{:target}}})
+                                   (controls/check-box
+                                     :text "Import first row as headers"
+                                     :selected false
+                                     :on-action {:event :toggle-option
+                                                 :path [:csv :first-row-headers]})
+                                   (controls/button
+                                     :text "Reset"
+                                     :on-action {:event :reset})]))))
+
+(defui Stage
+       (render [this {:keys [button-text] :as state}]
+               (controls/stage
+                 :shown true
+                 :title (str "JavaFX Scene Graph Demo")
+                 :scene (controls/scene
+                          :fill black
+                          :width 500
+                          :height 500
+                          :root (test-control {:button-text button-text})))))
+
+(def initial-state
+  {:button-text "Initially"})
+
+(defonce data-state (atom initial-state))
+
+(defmulti handle-event (fn [_ {:keys [event]}]
+                         event))
+
+(defn -main-2
+  ([] (-main-2 {:button-text "Press me!"}))
+  ([{:keys [button-text]}]
+   (swap! data-state assoc :button-text button-text)
+    (let [handler-fn (fn [event]
+                       (println event)
+                       (try
+                         (swap! data-state handle-event event)
+                         (catch Throwable exception
+                           (println exception))))
+          ui-state (agent (fx-dom/app (stage @data-state) handler-fn))]
+      (add-watch data-state :ui (fn [_ _ _ _]
+                                  (send ui-state
+                                        (fn [old-ui]
+                                          (println "-- State Updated --")
+                                          (println @data-state)
+                                          (fx-dom/update-app old-ui (stage @data-state)))))))))
+
+(defn -main-1 []
   (let [u (ui/stage
             :shown true
             :title "JavaFX Scene Graph Demo"
