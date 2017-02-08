@@ -80,12 +80,19 @@
                           :root (test-control {:button-text button-text})))))
 
 (def initial-state
-  {:button-text "Initially"})
+  {:button-text "Initially"
+   :times-pressed 0})
 
 (defonce data-state (atom initial-state))
 
 (defmulti handle-event (fn [_ {:keys [event]}]
                          event))
+
+(defmethod handle-event :press-button
+  [state {:keys [_]}]
+  (-> state
+      (update :times-pressed inc)
+      (assoc :button-text (str "Pressed: " (:times-pressed state)))))
 
 (defn -main-2
   ([] (-main-2 {:button-text "Press me!"}))
