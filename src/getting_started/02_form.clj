@@ -1,6 +1,6 @@
 (ns getting-started.02-form
   (:require [fn-fx.fx-dom :as dom]
-            [fn-fx.diff :refer [component defui render should-update?]]
+            [fn-fx.diff :refer [component defui-fx render should-update?]]
             [fn-fx.controls :as ui]))
 
 (def firebrick
@@ -8,7 +8,7 @@
 
 ;; The main login window component, notice the authed? parameter, this defines a function
 ;; we can use to construct these ui components, named "login-form"
-(defui LoginWindow
+(defui-fx LoginWindow
        (render [this {:keys [authed?]}]
                (ui/grid-pane
                  :alignment :center
@@ -66,7 +66,7 @@
                               :grid-pane/row-index 6)])))
 
 ;; Wrap our login form in a stage/scene, and create a "stage" function
-(defui Stage
+(defui-fx Stage
        (render [this args]
                (ui/stage
                  :title "JavaFX Welcome"

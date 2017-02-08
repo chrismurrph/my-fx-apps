@@ -1,7 +1,7 @@
 (ns fn-fx-ui.core
   (:require
     [fn-fx.fx-dom :as fx-dom]
-    [fn-fx.diff :refer [component defui render]]
+    [fn-fx.diff :refer [component defui-fx render]]
     [fn-fx.controls :as controls]
     [fn-fx.util :as util]
     [fn-fx.diff :as diff]
@@ -16,13 +16,13 @@
     (call [this entity]
       (ReadOnlyObjectWrapper. (f (.getValue entity))))))
 
-(defui TableColumn
+(defui-fx TableColumn
        (render [this {:keys [index name]}]
                (controls/table-column
                  :text name
                  :cell-value-factory (cell-value-factory #(nth % index)))))
 
-(defui Table
+(defui-fx Table
        (render [this {:keys [data]}]
                (controls/table-view
                  :columns (map-indexed
@@ -50,7 +50,7 @@
       (map build-series transposed-data))
     []))
 
-(defui Plot
+(defui-fx Plot
        (render [this {:keys [data]}]
                (diff/component [:javafx.scene.chart.ScatterChart
                                 []
@@ -65,7 +65,7 @@
         (println "Closing application")
         (javafx.application.Platform/exit)))))
 
-(defui Stage
+(defui-fx Stage
        (render [this {:keys [root-stage? data options] :as state}]
                (controls/stage
                  :title "fn-fx-ui"

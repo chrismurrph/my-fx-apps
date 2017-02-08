@@ -1,7 +1,8 @@
 (ns my-trys.scene-graph-demo
   (:require [fn-fx.fx-dom :as dom]
             [fn-fx.controls :as ui]
-            [fn-fx.diff :refer [component defui render]]
+            [fn-fx.diff :refer [component defui-fx render]]
+            [om-fx.next :refer [defui]]
             [fn-fx.controls :as controls]
             [fn-fx.fx-dom :as fx-dom])
   (:import [javafx.animation TranslateTransition ParallelTransition Timeline]
@@ -48,7 +49,7 @@
 
 ;(def transition (ui/parallel-transition r translate))
 
-(defui TestControl
+(defui-fx TestControl
        (render [this {:keys [button-text] :as state}]
                (controls/border-pane
                  :top (controls/h-box
@@ -59,7 +60,7 @@
                                      :text button-text
                                      :on-action {:event :press-button
                                                  :fn-fx/include {:fn-fx/event #{:target}}})
-                                   (controls/check-box
+                                   #_(controls/check-box
                                      :text "Import first row as headers"
                                      :selected false
                                      :on-action {:event :toggle-option
@@ -68,7 +69,7 @@
                                      :text "Reset"
                                      :on-action {:event :reset})]))))
 
-(defui Stage
+(defui-fx Stage
        (render [this {:keys [button-text] :as state}]
                (controls/stage
                  :shown true
@@ -90,9 +91,13 @@
 
 (defmethod handle-event :press-button
   [state {:keys [_]}]
-  (-> state
-      (update :times-pressed inc)
-      (assoc :button-text (str "Pressed: " (:times-pressed state)))))
+  (as-> state $
+      (update $ :times-pressed inc)
+        (assoc $ :button-text (str "Pressed: " (:times-pressed $)))))
+
+(defmethod handle-event :reset
+  [state {:keys [_]}]
+  initial-state)
 
 (defn -main-2
   ([] (-main-2 {:button-text "Press me!"}))

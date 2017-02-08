@@ -1,6 +1,6 @@
 (ns other-examples.shapes-3d
   (:require [fn-fx.fx-dom :as dom]
-            [fn-fx.diff :refer [component defui render should-update?]]
+            [fn-fx.diff :refer [component defui-fx render should-update?]]
             [fn-fx.controls :as ui]))
 
 (def red (ui/color :red 1 :blue 0 :green 0))
@@ -19,7 +19,7 @@
                      (color-mapping shape)
                      grey)))
 
-(defui MainWindow
+(defui-fx MainWindow
        (render [this {:keys [highlights rotate-x]}]
                (ui/group
                  :rotate rotate-x
@@ -40,7 +40,7 @@
                                          :translate-x 500 :translate-y -25 :translate-z 600)
                             (ui/point-light :translate-x 350 :translate-y 100 :translate-z 300)])))
 
-(defui Stage
+(defui-fx Stage
        (render [this args]
                (ui/stage
                  :title "3d Fn(fx)"

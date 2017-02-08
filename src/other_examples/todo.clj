@@ -1,11 +1,11 @@
 (ns other-examples.todo
   (:require [fn-fx.fx-dom :as dom]
-            [fn-fx.diff :refer [component defui render should-update?]]
+            [fn-fx.diff :refer [component defui-fx render should-update?]]
             [fn-fx.controls :as ui]))
 
 (def main-font (ui/font :family "Helvetica" :size 20))
 
-(defui TodoItem
+(defui-fx TodoItem
        (render [this {:keys [done? idx text]}]
                (ui/border-pane
                  :padding (ui/insets
@@ -21,7 +21,7 @@
                  :right (ui/button :text "X"
                                    :on-action {:event :delete-item :idx idx}))))
 
-(defui MainWindow
+(defui-fx MainWindow
        (render [this {:keys [todos]}]
                (ui/v-box
                  :style "-fx-base: rgb(30, 30, 35);"
@@ -42,7 +42,7 @@
                                           todos))])))
 
 
-(defui Stage
+(defui-fx Stage
        (render [this args]
                (ui/stage
                  :title "ToDos"

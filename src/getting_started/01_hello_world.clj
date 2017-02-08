@@ -1,7 +1,7 @@
 (ns getting-started.01-hello-world
   (:require [fn-fx.fx-dom :as dom]
             [fn-fx.controls :as ui]
-            [fn-fx.diff :refer [component defui render should-update?]]))
+            [fn-fx.diff :refer [component defui-fx render should-update?]]))
 
 (defn -main []
   (let [u (ui/stage
