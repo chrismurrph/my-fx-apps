@@ -2,7 +2,7 @@
   (:require [fn-fx.fx-dom :as dom]
             [fn-fx.controls :as ui]
             [fn-fx.diff :refer [component defui-fx render]]
-            [om-fx.next :refer [defui]]
+            [om-fx.next :as om :refer [defui]]
             [fn-fx.controls :as controls]
             [fn-fx.fx-dom :as fx-dom])
   (:import [javafx.animation TranslateTransition ParallelTransition Timeline]
@@ -69,7 +69,7 @@
                                      :text "Reset"
                                      :on-action {:event :reset})]))))
 
-(defui-fx Stage
+(defui-fx MainStage
        (render [this {:keys [button-text] :as state}]
                (controls/stage
                  :shown true
@@ -99,6 +99,28 @@
   [state {:keys [_]}]
   initial-state)
 
+;(defui HelloWorld
+;       Object
+;       (render [this]
+;               (println "Hello, world!")))
+;
+;(def hello (om/factory HelloWorld))
+
+(def app-state (atom {:count 0}))
+
+(defui MyCounter
+       Object
+       (render [this]
+               (let [{:keys [count]} (om/props this)]
+                 (test-control {:button-text "Some button"}))))
+
+(def reconciler
+  (om/reconciler {:state app-state}))
+
+(defn -main-3 []
+  (om/add-root! reconciler
+                MyCounter (gdom/getElement "app")))
+
 (defn -main-2
   ([] (-main-2 {:button-text "Press me!"}))
   ([{:keys [button-text]}]
@@ -109,13 +131,13 @@
                          (swap! data-state handle-event event)
                          (catch Throwable exception
                            (println exception))))
-          ui-state (agent (fx-dom/app (stage @data-state) handler-fn))]
+          ui-state (agent (fx-dom/app (main-stage @data-state) handler-fn))]
       (add-watch data-state :ui (fn [_ _ _ _]
                                   (send ui-state
                                         (fn [old-ui]
                                           (println "-- State Updated --")
                                           (println @data-state)
-                                          (fx-dom/update-app old-ui (stage @data-state)))))))))
+                                          (fx-dom/update-app old-ui (main-stage @data-state)))))))))
 
 (defn -main-1 []
   (let [u (ui/stage

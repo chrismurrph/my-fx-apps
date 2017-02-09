@@ -1,7 +1,12 @@
 (ns om-fx.next
   (:require
-    [om-fx.next.protocols :as p])
-  (:import [java.io Writer]))
+    [om-fx.next.protocols :as p]
+    [clojure.string :as str]
+    [om-fx.next.reconciler :as rec]
+    [om-fx.next.common :as com]
+    [om-fx.next.treedb :as db])
+  (:import [java.io Writer]
+           (clojure.lang IMapEntry IObj)))
 
 (defn collect-statics [dt]
   (letfn [(split-on-static [forms]
@@ -49,11 +54,11 @@
     (fn [[name [this :as args] & body]]
       `(~name [this#]
          (let [~this this#]
-           (binding [om.next/*reconciler* (om-fx.next/get-reconciler this#)
-                     om.next/*depth*      (inc (om-fx.next/depth this#))
-                     om.next/*shared*     (om-fx.next/shared this#)
-                     om.next/*instrument* (om-fx.next/instrument this#)
-                     om.next/*parent*     this#]
+           (binding [om-fx.next/*reconciler* (db/get-reconciler this#)
+                     om-fx.next/*depth* (inc (om-fx.next/depth this#))
+                     om-fx.next/*shared* (om-fx.next/shared this#)
+                     om-fx.next/*instrument* (om-fx.next/instrument this#)
+                     om-fx.next/*parent* this#]
              (let [ret# (do ~@body)
                    props# (:props this#)]
                (when-not @(:omcljs$mounted? props#)
@@ -62,8 +67,8 @@
     'componentWillMount
     (fn [[name [this :as args] & body]]
       `(~name [this#]
-         (let [~this    this#
-               indexer# (get-in (om-fx.next/get-reconciler this#) [:config :indexer])]
+         (let [~this this#
+               indexer# (get-in (db/get-reconciler this#) [:config :indexer])]
            (when-not (nil? indexer#)
              (om-fx.next.protocols/index-component! indexer# this#))
            ~@body)))}
@@ -72,7 +77,7 @@
      ([this#])
      ~'componentWillMount
      ([this#]
-       (let [indexer# (get-in (om-fx.next/get-reconciler this#) [:config :indexer])]
+       (let [indexer# (get-in (db/get-reconciler this#) [:config :indexer])]
          (when-not (nil? indexer#)
            (om-fx.next.protocols/index-component! indexer# this#))))
      ~'render
@@ -146,22 +151,9 @@
 (defmacro defui [name & forms]
   (defui*-clj name forms))
 
-(defn- get-prop
-  "PRIVATE: Do not use"
-  [c k]
-  (get (:props c) k))
-
-(defn component?
-  "Returns true if the argument is an Om component."
-  [x]
-  (if-not (nil? x)
-    (or (instance? p/IReactComponent x)
-       (satisfies? p/IReactComponent x))
-    false))
-
 (defn instrument [component]
-  {:pre [(component? component)]}
-  (get-prop component :omcljs$instrument))
+  {:pre [(com/component? component)]}
+  (com/get-prop component :omcljs$instrument))
 
 (defn shared
   "Return the global shared properties of the Om Next root. See :shared and
@@ -169,8 +161,8 @@
   ([component]
    (shared component []))
   ([component k-or-ks]
-   {:pre [(component? component)]}
-   (let [shared (get-prop component :omcljs$shared)
+   {:pre [(com/component? component)]}
+   (let [shared (com/get-prop component :omcljs$shared)
          ks     (cond-> k-or-ks
                         (not (sequential? k-or-ks)) vector)]
      (cond-> shared
@@ -180,10 +172,190 @@
   "PRIVATE: Returns the render depth (a integer) of the component relative to
    the mount root."
   [component]
-  (when (component? component)
-    (get-prop component :omcljs$depth)))
+  (when (com/component? component)
+    (com/get-prop component :omcljs$depth)))
 
-(defn get-reconciler
-  [c]
-  {:pre [(component? c)]}
-  (get-prop c :omcljs$reconciler))
+(defn- var->keyword [x]
+  (keyword (.substring (str x) 1)))
+
+(defn- replace-var [expr params]
+  (if (var? expr)
+    (get params (var->keyword expr) expr)
+    expr))
+
+(defn- bind-query [query params]
+  (let [qm (meta query)
+        tr (map #(bind-query % params))
+        ret (cond
+              (seq? query) (apply list (into [] tr query))
+              ;; What's the vector for??
+              #?@(:clj [(instance? IMapEntry query) (into [] tr query)])
+              (coll? query) (into (empty query) tr query)
+              :else (replace-var query params))]
+    (cond-> ret
+            (and qm (instance? IObj ret))
+            (with-meta qm))))
+
+(defn reconciler
+  "Construct a reconciler from a configuration map.
+
+   Required parameters:
+     :state        - the application state. If IAtom value is not supplied the
+                     data will be normalized into the default database format
+                     using the root query. This can be disabled by explicitly
+                     setting the optional :normalize parameter to false.
+     :parser       - the parser to be used
+
+   Optional parameters:
+     :shared       - a map of global shared properties for the component tree.
+     :shared-fn    - a function to compute global shared properties from the root props.
+                     the result is merged with :shared.
+     :send         - required only if the parser will return a non-empty value when
+                     run against the supplied :remotes. send is a function of two
+                     arguments, the map of remote expressions keyed by remote target
+                     and a callback which should be invoked with the result from each
+                     remote target. Note this means the callback can be invoked
+                     multiple times to support parallel fetching and incremental
+                     loading if desired. The callback should take the response as the
+                     first argument and the the query that was sent as the second
+                     argument.
+     :normalize    - whether the state should be normalized. If true it is assumed
+                     all novelty introduced into the system will also need
+                     normalization.
+     :remotes      - a vector of keywords representing remote services which can
+                     evaluate query expressions. Defaults to [:remote]
+     :root-render  - the root render function. Defaults to ReactDOM.render
+     :root-unmount - the root unmount function. Defaults to
+                     ReactDOM.unmountComponentAtNode
+     :logger       - supply a goog.log compatible logger
+     :tx-listen    - a function of 2 arguments that will listen to transactions.
+                     The first argument is the parser's env map also containing
+                     the old and new state. The second argument is a map containing
+                     the transaction, its result and the remote sends that the
+                     transaction originated."
+  [{:keys [state shared shared-fn
+           parser indexer
+           ui->props normalize
+           send merge-sends remotes
+           merge merge-tree merge-ident
+           prune-tree
+           optimize
+           history
+           root-render root-unmount
+           pathopt
+           migrate id-key
+           instrument tx-listen
+           easy-reads]
+    :or   {ui->props    rec/default-ui->props
+           indexer      rec/indexer
+           merge-sends  #(merge-with into %1 %2)
+           remotes      [:remote]
+           merge        rec/default-merge
+           merge-tree   rec/default-merge-tree
+           merge-ident  rec/default-merge-ident
+           prune-tree   rec/default-extract-errors
+           optimize     (fn [cs] (sort-by depth cs))
+           history      100
+           root-render  (fn [c target] c)
+           root-unmount (fn [x])
+           pathopt      false
+           migrate      rec/default-migrate
+           easy-reads   true}
+    :as   config}]
+  {:pre [(map? config)]}
+  (let [idxr   (indexer)
+        norm?  #?(:clj  (instance? clojure.lang.Atom state)
+                  :cljs (satisfies? IAtom state))
+        state' (if norm? state (atom state))
+        logger (if (contains? config :logger)
+                 (:logger config)
+                 #?(:cljs *logger*))
+        ret    (rec/Reconciler.
+                 {:state state' :shared shared :shared-fn shared-fn
+                  :parser parser :indexer idxr
+                  :ui->props ui->props
+                  :send send :merge-sends merge-sends :remotes remotes
+                  :merge merge :merge-tree merge-tree :merge-ident merge-ident
+                  :prune-tree prune-tree
+                  :optimize optimize
+                  :normalize (or (not norm?) normalize)
+                  :history #?(:clj  []
+                              :cljs (c/cache history))
+                  :root-render root-render :root-unmount root-unmount
+                  :logger logger :pathopt pathopt
+                  :migrate migrate :id-key id-key
+                  :instrument instrument :tx-listen tx-listen
+                  :easy-reads easy-reads}
+                 (atom {:queue []
+                        :remote-queue {}
+                        :queued false :queued-sends {}
+                        :sends-queued false
+                        :target nil :root nil :render nil :remove nil
+                        :t 0 :normalized norm?}))]
+    ret))
+
+;; =============================================================================
+;; Globals & Dynamics
+
+(def ^:private roots (atom {}))
+(def ^{:dynamic true} *raf* nil)
+(def ^{:dynamic true :private true} *reconciler* nil)
+(def ^{:dynamic true :private true} *parent* nil)
+(def ^{:dynamic true :private true} *shared* nil)
+(def ^{:dynamic true :private true} *instrument* nil)
+(def ^{:dynamic true :private true} *depth* 0)
+
+;; =============================================================================
+
+(defn- munge-component-name [x]
+         (let [ns-name (-> x meta :component-ns)
+               cl-name (-> x meta :component-name)]
+           (munge
+             (str (str/replace (str ns-name) "." "$") "$" cl-name))))
+
+(defn- compute-react-key [cl props]
+         (when-let [idx (-> props meta :om-path)]
+           (str (munge-component-name cl) "_" idx)))
+
+(defn factory
+  "Create a factory constructor from a component class created with
+   om.next/defui."
+  ([class]
+   (factory class nil))
+  ([class {:keys [validator keyfn instrument?]
+           :or {instrument? true} :as opts}]
+   {:pre [(fn? class)]}
+   (fn self
+     ([] (self nil))
+     ([props & children]
+      (when-not (nil? validator)
+        (assert (validator props)))
+      (if (and *instrument* instrument?)
+        (*instrument*
+          {:props    props
+           :children children
+           :class    class
+           :factory  (factory class (assoc opts :instrument? false))})
+        (let [react-key (cond
+                          (some? keyfn) (keyfn props)
+                          (some? (:react-key props)) (:react-key props)
+                          :else (compute-react-key class props))
+              ctor class
+              ref (:ref props)
+              props {:omcljs$reactRef   ref
+                     :omcljs$reactKey   react-key
+                     :omcljs$value      (cond-> props
+                                                (map? props) (dissoc :ref))
+                     :omcljs$mounted?   (atom false)
+                     :omcljs$path       (-> props meta :om-path)
+                     :omcljs$reconciler *reconciler*
+                     :omcljs$parent     *parent*
+                     :omcljs$shared     *shared*
+                     :omcljs$instrument *instrument*
+                     :omcljs$depth      *depth*}
+              component (ctor (atom nil) (atom nil) props children)]
+          (when ref
+            (assert (some? *parent*))
+            (swap! (:refs *parent*) assoc ref component))
+          (reset! (:state component) (.initLocalState component))
+          component))))))
