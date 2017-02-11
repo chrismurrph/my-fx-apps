@@ -9,11 +9,21 @@
         (satisfies? p/IReactComponent x))
     false))
 
+(defprotocol IQuery
+  (query [this] "Return the component's unbound query"))
+
+(defn iquery?
+  [x]
+  (if (fn? x)
+    (some? (-> x meta :query))
+    (let [class (cond-> x (component? x) class)]
+      (extends? IQuery class))))
+
 (defn props [component]
   {:pre [(component? component)]}
   (:omcljs$value (:props component)))
 
-(defn- get-prop
+(defn get-prop
   "PRIVATE: Do not use"
   [c k]
   (get (:props c) k))

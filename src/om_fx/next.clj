@@ -6,7 +6,34 @@
     [om-fx.next.common :as com]
     [om-fx.next.treedb :as db])
   (:import [java.io Writer]
-           (clojure.lang IMapEntry IObj)))
+           (clojure.lang IMapEntry IObj)
+           (om_fx.next.reconciler Reconciler)))
+
+(def props com/props)
+
+(def ^:private roots (atom {}))
+(def ^{:dynamic true} *raf* nil)
+
+(defn remove-root!
+  "Remove a root target (a DOM element) from a reconciler. The reconciler will
+   no longer attempt to reconcile application state with the specified root."
+  [reconciler target]
+  (p/remove-root! reconciler target))
+
+(defn add-root!
+  "Given a root component class and a target root DOM node, instantiate and
+   render the root class using the reconciler's :state property. The reconciler
+   will continue to observe changes to :state and keep the target node in sync.
+   Note a reconciler may have only one root. If invoked on a reconciler with an
+   existing root, the new root will replace the old one."
+  ([reconciler root-class target]
+   (add-root! reconciler root-class target nil))
+  ([reconciler root-class target options]
+   {:pre [(db/reconciler? reconciler) (fn? root-class)]}
+   (when-let [old-reconciler (get @roots target)]
+     (remove-root! old-reconciler target))
+   (swap! roots assoc target reconciler)
+   (p/add-root! reconciler root-class target options)))
 
 (defn collect-statics [dt]
   (letfn [(split-on-static [forms]
@@ -54,11 +81,11 @@
     (fn [[name [this :as args] & body]]
       `(~name [this#]
          (let [~this this#]
-           (binding [om-fx.next/*reconciler* (db/get-reconciler this#)
-                     om-fx.next/*depth* (inc (om-fx.next/depth this#))
-                     om-fx.next/*shared* (om-fx.next/shared this#)
-                     om-fx.next/*instrument* (om-fx.next/instrument this#)
-                     om-fx.next/*parent* this#]
+           (binding [om-fx.next.reconciler/*reconciler* (db/get-reconciler this#)
+                     om-fx.next.reconciler/*depth* (inc (om-fx.next/depth this#))
+                     om-fx.next.reconciler/*shared* (om-fx.next/shared this#)
+                     om-fx.next.reconciler/*instrument* (om-fx.next/instrument this#)
+                     om-fx.next.reconciler/*parent* this#]
              (let [ret# (do ~@body)
                    props# (:props this#)]
                (when-not @(:omcljs$mounted? props#)
@@ -175,27 +202,6 @@
   (when (com/component? component)
     (com/get-prop component :omcljs$depth)))
 
-(defn- var->keyword [x]
-  (keyword (.substring (str x) 1)))
-
-(defn- replace-var [expr params]
-  (if (var? expr)
-    (get params (var->keyword expr) expr)
-    expr))
-
-(defn- bind-query [query params]
-  (let [qm (meta query)
-        tr (map #(bind-query % params))
-        ret (cond
-              (seq? query) (apply list (into [] tr query))
-              ;; What's the vector for??
-              #?@(:clj [(instance? IMapEntry query) (into [] tr query)])
-              (coll? query) (into (empty query) tr query)
-              :else (replace-var query params))]
-    (cond-> ret
-            (and qm (instance? IObj ret))
-            (with-meta qm))))
-
 (defn reconciler
   "Construct a reconciler from a configuration map.
 
@@ -264,28 +270,25 @@
     :as   config}]
   {:pre [(map? config)]}
   (let [idxr   (indexer)
-        norm?  #?(:clj  (instance? clojure.lang.Atom state)
-                  :cljs (satisfies? IAtom state))
+        norm?  (instance? clojure.lang.Atom state)
         state' (if norm? state (atom state))
-        logger (if (contains? config :logger)
-                 (:logger config)
-                 #?(:cljs *logger*))
-        ret    (rec/Reconciler.
-                 {:state state' :shared shared :shared-fn shared-fn
-                  :parser parser :indexer idxr
-                  :ui->props ui->props
-                  :send send :merge-sends merge-sends :remotes remotes
-                  :merge merge :merge-tree merge-tree :merge-ident merge-ident
+        logger (when (contains? config :logger)
+                 (:logger config))
+        ret    (Reconciler.
+                 {:state      state' :shared shared :shared-fn shared-fn
+                  :parser     parser :indexer idxr
+                  :ui->props  ui->props
+                  :send       send :merge-sends merge-sends :remotes remotes
+                  :merge      merge :merge-tree merge-tree :merge-ident merge-ident
                   :prune-tree prune-tree
-                  :optimize optimize
-                  :normalize (or (not norm?) normalize)
-                  :history #?(:clj  []
-                              :cljs (c/cache history))
-                  :root-render root-render :root-unmount root-unmount
-                  :logger logger :pathopt pathopt
-                  :migrate migrate :id-key id-key
-                  :instrument instrument :tx-listen tx-listen
-                  :easy-reads easy-reads}
+                  :optimize   optimize
+                  :normalize  (or (not norm?) normalize)
+                  :history    []
+                              :root-render root-render :root-unmount root-unmount
+                              :logger logger :pathopt pathopt
+                              :migrate migrate :id-key id-key
+                              :instrument instrument :tx-listen tx-listen
+                              :easy-reads easy-reads}
                  (atom {:queue []
                         :remote-queue {}
                         :queued false :queued-sends {}
@@ -293,69 +296,3 @@
                         :target nil :root nil :render nil :remove nil
                         :t 0 :normalized norm?}))]
     ret))
-
-;; =============================================================================
-;; Globals & Dynamics
-
-(def ^:private roots (atom {}))
-(def ^{:dynamic true} *raf* nil)
-(def ^{:dynamic true :private true} *reconciler* nil)
-(def ^{:dynamic true :private true} *parent* nil)
-(def ^{:dynamic true :private true} *shared* nil)
-(def ^{:dynamic true :private true} *instrument* nil)
-(def ^{:dynamic true :private true} *depth* 0)
-
-;; =============================================================================
-
-(defn- munge-component-name [x]
-         (let [ns-name (-> x meta :component-ns)
-               cl-name (-> x meta :component-name)]
-           (munge
-             (str (str/replace (str ns-name) "." "$") "$" cl-name))))
-
-(defn- compute-react-key [cl props]
-         (when-let [idx (-> props meta :om-path)]
-           (str (munge-component-name cl) "_" idx)))
-
-(defn factory
-  "Create a factory constructor from a component class created with
-   om.next/defui."
-  ([class]
-   (factory class nil))
-  ([class {:keys [validator keyfn instrument?]
-           :or {instrument? true} :as opts}]
-   {:pre [(fn? class)]}
-   (fn self
-     ([] (self nil))
-     ([props & children]
-      (when-not (nil? validator)
-        (assert (validator props)))
-      (if (and *instrument* instrument?)
-        (*instrument*
-          {:props    props
-           :children children
-           :class    class
-           :factory  (factory class (assoc opts :instrument? false))})
-        (let [react-key (cond
-                          (some? keyfn) (keyfn props)
-                          (some? (:react-key props)) (:react-key props)
-                          :else (compute-react-key class props))
-              ctor class
-              ref (:ref props)
-              props {:omcljs$reactRef   ref
-                     :omcljs$reactKey   react-key
-                     :omcljs$value      (cond-> props
-                                                (map? props) (dissoc :ref))
-                     :omcljs$mounted?   (atom false)
-                     :omcljs$path       (-> props meta :om-path)
-                     :omcljs$reconciler *reconciler*
-                     :omcljs$parent     *parent*
-                     :omcljs$shared     *shared*
-                     :omcljs$instrument *instrument*
-                     :omcljs$depth      *depth*}
-              component (ctor (atom nil) (atom nil) props children)]
-          (when ref
-            (assert (some? *parent*))
-            (swap! (:refs *parent*) assoc ref component))
-          (reset! (:state component) (.initLocalState component))
-          component))))))

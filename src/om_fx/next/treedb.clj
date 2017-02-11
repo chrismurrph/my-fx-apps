@@ -2,7 +2,10 @@
   (:require [om-fx.util :as util]
             [om-fx.next.common :as com]
             [clojure.zip :as zip]
-            [om-fx.next.protocols :as p]))
+            [om-fx.next.protocols :as p]
+            [clojure.reflect :as reflect]
+            [clojure.string :as str])
+  (:import (clojure.lang IObj IMapEntry)))
 
 (defn- normalize* [query data refs union-seen]
   (cond
@@ -41,8 +44,7 @@
                 ;; normalize one
                 (map? v)
                 (let [x (normalize* sel v refs union-entry)]
-                  (if-not (or (nil? class) (not #?(:clj  (-> class meta :ident)
-                                                   :cljs (implements? com/Ident class))))
+                  (if-not (or (nil? class) (not (-> class meta :ident)))
                     (let [i ((-> class meta :ident) class v)]
                       (swap! refs update-in [(first i) (second i)] merge x)
                       (recur (next q) (assoc ret k i)))
@@ -51,8 +53,7 @@
                 ;; normalize many
                 (vector? v)
                 (let [xs (into [] (map #(normalize* sel % refs union-entry)) v)]
-                  (if-not (or (nil? class) (not #?(:clj  (-> class meta :ident)
-                                                   :cljs (implements? com/Ident class))))
+                  (if-not (or (nil? class) (not (-> class meta :ident)))
                     (let [is (into [] (map #((-> class meta :ident) class %)) xs)]
                       (if (vector? sel)
                         (when-not (empty? is)
@@ -84,17 +85,55 @@
                 (recur (next q) (assoc ret k v))))))
         ret))))
 
-(defprotocol IQuery
-  (query [this] "Return the component's unbound query"))
-
 (defprotocol IQueryParams
   (params [this] "Return the query parameters"))
+
+(defn get-reconciler
+  [c]
+  {:pre [(com/component? c)]}
+  (com/get-prop c :omcljs$reconciler))
+
+(defn- component->query-data [component]
+  (some-> (get-reconciler component)
+          :config :state deref ::queries (get component)))
+
+(defn- var->keyword [x]
+  (keyword (.substring (str x) 1)))
+
+(defn- replace-var [expr params]
+  (if (var? expr)
+    (get params (var->keyword expr) expr)
+    expr))
+
+(defn- bind-query [query params]
+  (let [qm (meta query)
+        tr (map #(bind-query % params))
+        ret (cond
+              (seq? query) (apply list (into [] tr query))
+              (instance? IMapEntry query) (into [] tr query)
+              (coll? query) (into (empty query) tr query)
+              :else (replace-var query params))]
+    (cond-> ret
+            (and qm (instance? IObj ret))
+            (with-meta qm))))
+
+(defn react-type
+  "Returns the component type, regardless of whether the component has been
+   mounted"
+  [component]
+  {:pre [(com/component? component)]}
+  (let [[klass-name] (str/split (reflect/typename (type component)) #"_klass")
+        last-idx-dot (.lastIndexOf klass-name ".")
+        ns (clojure.main/demunge (subs klass-name 0 last-idx-dot))
+        c (subs klass-name (inc last-idx-dot))]
+    @(or (find-var (symbol ns c))
+         (find-var (symbol ns (clojure.main/demunge c))))))
 
 (defn get-component-query
   ([component]
    (get-component-query component (component->query-data component)))
   ([component query-data]
-   (let [q  (:query query-data (query component))
+   (let [q  (:query query-data (com/query component))
          c' (-> q meta :component)]
      (assert (nil? c')
              (str "Query violation, " component " reuses " c' " query"))
@@ -108,15 +147,14 @@
   [x]
   (if (com/component? x)
     (get-component-query x)
-    (let [q #?(:clj  ((-> x meta :query) x)
-               :cljs (query x))
+    (let [q ((-> x meta :query) x)
           c (-> q meta :component)]
       (assert (nil? c) (str "Query violation, " x , " reuses " c " query"))
       (with-meta (bind-query q (params x)) {:component x}))))
 
 ;; this function assumes focus is actually in fact
 ;; already focused!
-(defn- focus->path
+(defn focus->path
   "Given a focused query return the path represented by the query.
 
    Examples:
@@ -140,7 +178,6 @@
        (recur focus' bound (conj path k)))
      path)))
 
-
 (defn- get-indexed-query
   "Get a component's static query from the indexer. For recursive queries, recurses
    up the data path. Falls back to `get-class-or-instance-query` if nothing is
@@ -157,11 +194,6 @@
           (recur component class-path-query-data (pop data-path))))
       (get-class-or-instance-query component))))
 
-(defn get-reconciler
-  [c]
-  {:pre [(com/component? c)]}
-  (com/get-prop c :omcljs$reconciler))
-
 (defn reconciler?
   "Returns true if x is a reconciler."
   [x]
@@ -174,12 +206,40 @@
   {:pre [(reconciler? reconciler)]}
   (-> reconciler :config :indexer))
 
+(defn- parent
+  "Returns the parent Om component."
+  [component]
+  (com/get-prop component :omcljs$parent))
+
+(defn raw-class-path
+  "Return the raw component class path associated with a component. Contains
+   duplicates for recursive component trees."
+  [c]
+  (loop [c c ret (list (react-type c))]
+    (if-let [p (parent c)]
+      (if (com/iquery? p)
+        (recur p (cons (react-type p) ret))
+        (recur p ret))
+      ret)))
+
+(defn class-path
+  "Return the component class path associated with a component."
+  [c]
+  {:pre [(com/component? c)]}
+  (let [raw-cp (raw-class-path c)]
+    (loop [cp (seq raw-cp) ret [] seen #{}]
+      (if cp
+        (let [c (first cp)]
+          (if (contains? seen c)
+            (recur (next cp) ret seen)
+            (recur (next cp) (conj ret c) (conj seen c))))
+        (seq ret)))))
+
 (defn get-query
   "Return a IQuery/IParams instance bound query. Works for component classes
    and component instances. See also om.next/full-query."
   [x]
-  (when #?(:clj  (iquery? x)
-           :cljs (implements? IQuery x))
+  (when (com/iquery? x)
     (if (com/component? x)
       (if-let [query-data (component->query-data x)]
         (get-component-query x query-data)
@@ -207,6 +267,143 @@
          (assoc (merge ret refs')
            ::tables (into #{} (keys refs'))))
        (with-meta ret @refs)))))
+
+(defn- mappable-ident? [refs ident]
+  (and (util/ident? ident)
+       (contains? refs (first ident))))
+
+(declare focus-query*)
+
+(defn- focused-join [expr ks full-expr union-expr]
+  (let [expr-meta (meta expr)
+        expr' (cond
+                (map? expr)
+                (let [join-value (-> expr first second)
+                      join-value (if (and (util/recursion? join-value)
+                                          (seq ks))
+                                   (if-not (nil? union-expr)
+                                     union-expr
+                                     full-expr)
+                                   join-value)]
+                  {(ffirst expr) (focus-query* join-value ks nil)})
+
+                (seq? expr) (list (focused-join (first expr) ks nil nil) (second expr))
+                :else       expr)]
+    (cond-> expr'
+            (some? expr-meta) (with-meta expr-meta))))
+
+(defn- focus-query*
+  [query path union-expr]
+  (if (empty? path)
+    query
+    (let [[k & ks] path]
+      (letfn [(match [x]
+                (= k (util/join-key x)))
+              (value [x]
+                (focused-join x ks query union-expr))]
+        (if (map? query) ;; UNION
+          {k (focus-query* (get query k) ks query)}
+          (into [] (comp (filter match) (map value) (take 1)) query))))))
+
+(defn focus-query
+  "Given a query, focus it along the specified path.
+
+  Examples:
+    (om.next/focus-query [:foo :bar :baz] [:foo])
+    => [:foo]
+
+    (om.next/focus-query [{:foo [:bar :baz]} :woz] [:foo :bar])
+    => [{:foo [:bar]}]"
+  [query path]
+  (focus-query* query path nil))
+
+(defn expr->key
+  "Given a query expression return its key."
+  [expr]
+  (cond
+    (keyword? expr) expr
+    (map? expr)     (ffirst expr)
+    (seq? expr)     (let [expr' (first expr)]
+                      (when (map? expr')
+                        (ffirst expr')))
+    (util/ident? expr)   (cond-> expr (= '_ (second expr)) first)
+    :else
+    (throw
+      (ex-info (str "Invalid query expr " expr)
+               {:type :error/invalid-expression}))))
+
+(defn- move-to-key
+  "Move from the current zipper location to the specified key. loc must be a
+   hash map node."
+  [loc k]
+  (loop [loc (zip/down loc)]
+    (let [node (zip/node loc)]
+      (if (= k (first node))
+        (-> loc zip/down zip/right)
+        (recur (zip/right loc))))))
+
+(defn- query-zip
+  "Return a zipper on a query expression."
+  [root]
+  (zip/zipper
+    #(or (vector? %) (map? %) (seq? %))
+    seq
+    (fn [node children]
+      (let [ret (cond
+                  (vector? node) (vec children)
+                  (map? node)    (into {} children)
+                  (seq? node)    children)]
+        (with-meta ret (meta node))))
+    root))
+
+(defn query-template
+  "Given a query and a path into a query return a zipper focused at the location
+   specified by the path. This location can be replaced to customize / alter
+   the query."
+  [query path]
+  (letfn [(query-template* [loc path]
+            (if (empty? path)
+              loc
+              (let [node (zip/node loc)]
+                (if (vector? node) ;; SUBQUERY
+                  (recur (zip/down loc) path)
+                  (let [[k & ks] path
+                        k' (expr->key node)]
+                    (if (= k k')
+                      (if (or (map? node)
+                              (and (seq? node) (map? (first node))))
+                        (let [loc'  (move-to-key (cond-> loc (seq? node) zip/down) k)
+                              node' (zip/node loc')]
+                          (if (map? node') ;; UNION
+                            (if (seq ks)
+                              (recur
+                                (zip/replace loc'
+                                             (zip/node (move-to-key loc' (first ks))))
+                                (next ks))
+                              loc')
+                            (recur loc' ks))) ;; JOIN
+                        (recur (-> loc zip/down zip/down zip/down zip/right) ks)) ;; CALL
+                      (recur (zip/right loc) path)))))))]
+    (query-template* (query-zip query) path)))
+
+(defn reduce-query-depth
+  "Changes a join on key k with depth limit from [:a {:k n}] to [:a {:k (dec n)}]"
+  [q k]
+  (if-not (empty? (focus-query q [k]))
+    (let [pos (query-template q [k])
+          node (zip/node pos)
+          node' (cond-> node (number? node) dec)]
+      (replace pos node'))
+    q))
+
+(defn- reduce-union-recursion-depth
+  "Given a union expression decrement each of the query roots by one if it
+   is recursive."
+  [union-expr recursion-key]
+  (->> union-expr
+       (map (fn [[k q]] [k (reduce-query-depth q recursion-key)]))
+       (into {})))
+
 
 (defn- denormalize*
   "Denormalize a data based on query. refs is a data structure which maps idents

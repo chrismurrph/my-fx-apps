@@ -43,7 +43,7 @@
    mutations."}
   om-fx.next.impl.parser
   (:require [clojure.set :as set]
-            [om.util :as util]))
+            [om-fx.util :as util]))
 
 (declare expr->ast)
 

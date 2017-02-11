@@ -6,65 +6,17 @@
             [clojure.zip :as zip]
             [clojure.string :as str]
             [clojure.reflect :as reflect]
-            [om-fx.next.impl.parser :as parser])
+            [om-fx.next.impl.parser :as parser]
+            [om-fx.next.treedb :as treedb])
   (:import (om_fx.next.common Ident)
            (clojure.lang IDeref)
            (om_fx.next.treedb IQuery)))
 
-(defn iquery?
-  [x]
-  (if (fn? x)
-    (some? (-> x meta :query))
-    (let [class (cond-> x (com/component? x) class)]
-      (extends? IQuery class))))
-
-(defn react-type
-  "Returns the component type, regardless of whether the component has been
-   mounted"
-  [component]
-  {:pre [(com/component? component)]}
-  (let [[klass-name] (str/split (reflect/typename (type component)) #"_klass")
-        last-idx-dot (.lastIndexOf klass-name ".")
-        ns (clojure.main/demunge (subs klass-name 0 last-idx-dot))
-        c (subs klass-name (inc last-idx-dot))]
-    @(or (find-var (symbol ns c))
-         (find-var (symbol ns (clojure.main/demunge c))))))
-
-(defn- parent
-  "Returns the parent Om component."
-  [component]
-  (com/get-prop component :omcljs$parent))
-
-(defn- raw-class-path
-  "Return the raw component class path associated with a component. Contains
-   duplicates for recursive component trees."
-  [c]
-  (loop [c c ret (list (react-type c))]
-    (if-let [p (parent c)]
-      (if (iquery? p)
-        (recur p (cons (react-type p) ret))
-        (recur p ret))
-      ret)))
-
-(defn class-path
-  "Return the component class path associated with a component."
-  [c]
-  {:pre [(com/component? c)]}
-  (let [raw-cp (raw-class-path c)]
-    (loop [cp (seq raw-cp) ret [] seen #{}]
-      (if cp
-        (let [c (first cp)]
-          (if (contains? seen c)
-            (recur (next cp) ret seen)
-            (recur (next cp) (conj ret c) (conj seen c))))
-        (seq ret)))))
-
 (defn- recursive-class-path?
   "Returns true if a component's classpath is recursive"
-  #?(:cljs {:tag boolean})
   [c]
   {:pre [(com/component? c)]}
-  (not (apply distinct? (raw-class-path c))))
+  (not (apply distinct? (treedb/raw-class-path c))))
 
 (defn- get-dispatch-key [prop]
   (cond-> prop
@@ -76,20 +28,20 @@
   "Returns the absolute query for a given component, not relative like
    om.next/get-query."
   ([component]
-   (when (iquery? component)
+   (when (com/iquery? component)
      (if (nil? (com/path component))
        (replace
          (first
            (get-in @(-> component db/get-reconciler db/get-indexer)
-                   [:class-path->query (class-path component)]))
+                   [:class-path->query (treedb/class-path component)]))
          (db/get-query component))
        (full-query component (db/get-query component)))))
   ([component query]
-   (when (iquery? component)
+   (when (com/iquery? component)
      (let [xf    (cond->> (remove number?)
                           (recursive-class-path? component) (comp (distinct)))
            path' (into [] xf (com/path component))
-           cp    (class-path component)
+           cp    (treedb/class-path component)
            qs    (get-in @(-> component db/get-reconciler db/get-indexer)
                          [:class-path->query cp])]
        (if-not (empty? qs)
@@ -98,7 +50,7 @@
          (let [q (->> qs
                       (filter #(= path'
                                   (mapv get-dispatch-key
-                                        (-> % zip/root (focus->path path')))))
+                                        (-> % zip/root (treedb/focus->path path')))))
                       first)]
            (if-not (nil? q)
              (replace q query)
@@ -111,7 +63,7 @@
 
 (defn default-ui->props
   [{:keys [parser pathopt] :as env} c]
-  (let [ui (when (and pathopt (satisfies? Ident c) (iquery? c))
+  (let [ui (when (and pathopt (satisfies? Ident c) (com/iquery? c))
              (let [id (com/ident c (com/props c))]
                (get (parser env [{id (db/get-query c)}]) id)))]
     (if-not (nil? ui)
@@ -143,17 +95,46 @@
   (when (boolean (:ns &env))
     (invariant* condition message &env)))
 
-(defn react-type
-  "Returns the component type, regardless of whether the component has been
-   mounted"
-  [component]
-  {:pre [(com/component? component)]}
-  (let [[klass-name] (str/split (reflect/typename (type component)) #"_klass")
-        last-idx-dot (.lastIndexOf klass-name ".")
-        ns (clojure.main/demunge (subs klass-name 0 last-idx-dot))
-        c (subs klass-name (inc last-idx-dot))]
-    @(or (find-var (symbol ns c))
-         (find-var (symbol ns (clojure.main/demunge c))))))
+(defn- cascade-query
+  "Cascades a query up the classpath. class-path->query is a map of classpaths
+   to their queries. classpath is the classpath where we start cascading (typically
+   the direct parent's classpath of the component changing query). data-path is
+   the data path in the classpath's query to the new query. new-query is the
+   query to be applied to the classpaths. union-keys are any keys into union
+   queries found during index building; they are used to access union queries
+   when cascading the classpath, and to generate the classpaths' rendered-paths,
+   which skip these keys."
+  [class-path->query classpath data-path new-query union-keys]
+  (loop [cp classpath
+         data-path data-path
+         new-query new-query
+         ret {}]
+    (if-not (empty? cp)
+      (let [rendered-data-path (into [] (remove (set union-keys)) data-path)
+            filter-data-path (cond-> rendered-data-path
+                                     (not (empty? rendered-data-path)) pop)
+            qs (filter #(= filter-data-path
+                           (-> % zip/root (treedb/focus->path filter-data-path)))
+                       (get class-path->query cp))
+            qs' (into #{}
+                      (map (fn [q]
+                             (let [new-query (if (or (map? (zip/node q))
+                                                     (some #{(peek data-path)} union-keys))
+                                               (let [union-key (peek data-path)]
+                                                 (-> (treedb/query-template (zip/root q)
+                                                                     rendered-data-path)
+                                                     zip/node
+                                                     (assoc union-key new-query)))
+                                               new-query)]
+                               (-> (zip/root q)
+                                   (treedb/query-template rendered-data-path)
+                                   (replace new-query)
+                                   (treedb/focus-query filter-data-path)
+                                   (treedb/query-template filter-data-path)))))
+                      qs)]
+        (recur (pop cp) (pop data-path)
+               (-> qs' first zip/node) (assoc ret cp qs')))
+      ret)))
 
 (defrecord Indexer [indexes extfs]
   IDeref
@@ -164,10 +145,10 @@
     (let [prop->classes     (atom {})
           class-path->query (atom {})
           rootq             (db/get-query x)
-          root-class        (cond-> x (com/component? x) react-type)]
+          root-class        (cond-> x (com/component? x) treedb/react-type)]
       (letfn [(build-index* [class query path classpath union-expr union-keys]
-                (invariant (or (not (iquery? class))
-                               (and (iquery? class)
+                (invariant (or (not (com/iquery? class))
+                               (and (com/iquery? class)
                                     (not (empty? query))))
                            (str "`IQuery` implementation must return a non-empty query."
                                 " Check the `IQuery` implementation of component `"
@@ -189,7 +170,7 @@
                                        (-> @class-path->query
                                            (get [root-class]) first zip/root))]
                       (swap! class-path->query update-in [classpath] (fnil conj #{})
-                             (query-template (focus-query root-query path) path))))
+                             (treedb/query-template (treedb/focus-query root-query path) path))))
                   (let [recursive-join? (and recursive?
                                              (some (fn [e]
                                                      (and (util/join? e)
@@ -226,7 +207,7 @@
                                   cs (get dp->cs rendered-path')
                                   cascade-query? (and (= (count cs) 1)
                                                       (= (-> query' meta :component)
-                                                         (react-type (first cs)))
+                                                         (treedb/react-type (first cs)))
                                                       (not (map? query')))
                                   query''        (if cascade-query?
                                                    (db/get-query (first cs))
@@ -247,7 +228,7 @@
                         (doseq [[prop query'] query]
                           (let [path'          (conj path prop)
                                 class'         (-> query' meta :component)
-                                cs             (filter #(= class' (react-type %))
+                                cs             (filter #(= class' (treedb/react-type %))
                                                        (get dp->cs path))
                                 cascade-query? (and class' (= (count cs) 1))
                                 query''        (if cascade-query?
@@ -258,16 +239,16 @@
                                     q         (first qs)
                                     qnode     (zip/node
                                                 (cond-> q
-                                                        (nil? class) (query-template path)))
+                                                        (nil? class) (treedb/query-template path)))
                                     new-query (assoc qnode
                                                 prop query'')
                                     q'        (cond-> (zip/replace
-                                                        (query-template (zip/root q) path)
+                                                        (treedb/query-template (zip/root q) path)
                                                         new-query)
                                                       (nil? class)
                                                       (-> zip/root
-                                                          (focus-query (pop path))
-                                                          (query-template (pop path))))
+                                                          (treedb/focus-query (pop path))
+                                                          (treedb/query-template (pop path))))
                                     qs'       (into #{q'} (remove #{q}) qs)
                                     cp->q'    (merge {classpath qs'}
                                                      (cascade-query @class-path->query
@@ -284,14 +265,13 @@
     (swap! indexes
            (fn [indexes]
              (let [indexes (update-in ((:index-component extfs) indexes c)
-                                      [:class->components (react-type c)]
+                                      [:class->components (treedb/react-type c)]
                                       (fnil conj #{}) c)
                    data-path (into [] (remove number?) (com/path c))
                    indexes (update-in ((:index-component extfs) indexes c)
                                       [:data-path->components data-path]
                                       (fnil conj #{}) c)
-                   ident     (when #?(:clj  (satisfies? Ident c)
-                                      :cljs (implements? Ident c))
+                   ident     (when (satisfies? Ident c)
                                (let [ident (com/ident c (com/props c))]
                                  (invariant (util/ident? ident)
                                             (str "malformed Ident. An ident must be a vector of "
@@ -312,7 +292,7 @@
     (swap! indexes
            (fn [indexes]
              (let [indexes (update-in ((:drop-component extfs) indexes c)
-                                      [:class->components (react-type c)]
+                                      [:class->components (treedb/react-type c)]
                                       disj c)
                    data-path (into [] (remove number?) (com/path c))
                    indexes (update-in ((:drop-component extfs) indexes c)
@@ -455,21 +435,6 @@
   [x]
   (and (map? x) (contains? x ::error)))
 
-(defn- expr->key
-  "Given a query expression return its key."
-  [expr]
-  (cond
-    (keyword? expr) expr
-    (map? expr)     (ffirst expr)
-    (seq? expr)     (let [expr' (first expr)]
-                      (when (map? expr')
-                        (ffirst expr')))
-    (util/ident? expr)   (cond-> expr (= '_ (second expr)) first)
-    :else
-    (throw
-      (ex-info (str "Invalid query expr " expr)
-               {:type :error/invalid-expression}))))
-
 (defn default-extract-errors [reconciler res query]
   (letfn [(extract* [query res errs]
             (let [class      (-> query meta :component)
@@ -486,7 +451,7 @@
                   (loop [exprs (seq query) ret ret]
                     (if-not (nil? exprs)
                       (let [expr (first exprs)
-                            k    (as-> (expr->key expr) k
+                            k    (as-> (treedb/expr->key expr) k
                                        (cond-> k
                                                (util/unique-ident? k) first))
                             data (get res k)]
@@ -551,6 +516,239 @@
     (let [errs (atom {})
           ret  (extract* query res errs)]
       {:tree ret :errors @errs})))
+
+(defn- to-env [x]
+  (let [config (if (treedb/reconciler? x) (:config x) x)]
+    (select-keys config [:state :shared :parser :logger :pathopt])))
+
+(defn- munge-component-name [x]
+  (let [ns-name (-> x meta :component-ns)
+        cl-name (-> x meta :component-name)]
+    (munge
+      (str (str/replace (str ns-name) "." "$") "$" cl-name))))
+
+(defn- compute-react-key [cl props]
+  (when-let [idx (-> props meta :om-path)]
+    (str (munge-component-name cl) "_" idx)))
+
+;; =============================================================================
+;; Globals & Dynamics
+
+(def ^{:dynamic true :private true} *instrument* nil)
+(def ^{:dynamic true :private true} *reconciler* nil)
+(def ^{:dynamic true :private true} *parent* nil)
+(def ^{:dynamic true :private true} *shared* nil)
+(def ^{:dynamic true :private true} *depth* 0)
+
+;; =============================================================================
+
+(defn factory
+  "Create a factory constructor from a component class created with
+   om.next/defui."
+  ([class]
+   (factory class nil))
+  ([class {:keys [validator keyfn instrument?]
+           :or {instrument? true} :as opts}]
+   {:pre [(fn? class)]}
+   (fn self
+     ([] (self nil))
+     ([props & children]
+      (when-not (nil? validator)
+        (assert (validator props)))
+      (if (and *instrument* instrument?)
+        (*instrument*
+          {:props    props
+           :children children
+           :class    class
+           :factory  (factory class (assoc opts :instrument? false))})
+        (let [react-key (cond
+                          (some? keyfn) (keyfn props)
+                          (some? (:react-key props)) (:react-key props)
+                          :else (compute-react-key class props))
+              ctor class
+              ref (:ref props)
+              props {:omcljs$reactRef   ref
+                     :omcljs$reactKey   react-key
+                     :omcljs$value      (cond-> props
+                                                (map? props) (dissoc :ref))
+                     :omcljs$mounted?   (atom false)
+                     :omcljs$path       (-> props meta :om-path)
+                     :omcljs$reconciler *reconciler*
+                     :omcljs$parent     *parent*
+                     :omcljs$shared     *shared*
+                     :omcljs$instrument *instrument*
+                     :omcljs$depth      *depth*}
+              component (ctor (atom nil) (atom nil) props children)]
+          (when ref
+            (assert (some? *parent*))
+            (swap! (:refs *parent*) assoc ref component))
+          (reset! (:state component) (.initLocalState component))
+          component))))))
+
+(defn gather-sends
+  "Given an environment, a query and a set of remotes return a hash map of remotes
+   mapped to the query specific to that remote."
+  [{:keys [parser] :as env} q remotes]
+  (into {}
+        (comp
+          (map #(vector % (parser env q %)))
+          (filter (fn [[_ v]] (pos? (count v)))))
+        remotes))
+
+(defrecord Reconciler [config state]
+  clojure.lang.IDeref
+  (deref [this] @(:state config))
+
+  p/IReconciler
+  (basis-t [_] (:t @state))
+
+  (add-root! [this root-class target options]
+    (let [ret   (atom nil)
+          rctor (factory root-class)
+          guid  (java.util.UUID/randomUUID)]
+      (when (com/iquery? root-class)
+        (p/index-root (:indexer config) root-class))
+      (when (and (:normalize config)
+                 (not (:normalized @state)))
+        (let [new-state (db/tree->db root-class @(:state config))
+              refs      (meta new-state)]
+          (reset! (:state config) (merge new-state refs))
+          (swap! state assoc :normalized true)))
+      (let [renderf (fn [data]
+                      (binding [*reconciler* this
+                                *shared*     (merge
+                                               (:shared config)
+                                               (when (:shared-fn config)
+                                                 ((:shared-fn config) data)))
+                                *instrument* (:instrument config)]
+                        (let [c (cond
+                                  (nil? @ret) (rctor data)
+                                  :else (when-let [c' @ret]
+                                          c'))]
+                          (when (and (nil? @ret) (not (nil? c)))
+                            (swap! state assoc :root c)
+                            (reset! ret c)))))
+            parsef  (fn []
+                      (let [sel (db/get-query (or @ret root-class))]
+                        (assert (or (nil? sel) (vector? sel))
+                                "Application root query must be a vector")
+                        (if-not (nil? sel)
+                          (let [env (to-env config)
+                                v   ((:parser config) env sel)]
+                            (when-not (empty? v)
+                              (renderf v)))
+                          (renderf @(:state config)))))]
+        (swap! state merge
+               {:target target :render parsef :root root-class
+                :remove (fn []
+                          (remove-watch (:state config) (or target guid))
+                          (swap! state
+                                 #(-> %
+                                      (dissoc :target) (dissoc :render) (dissoc :root)
+                                      (dissoc :remove)))
+                          (when-not (nil? target)
+                            ((:root-unmount config) target)))})
+        (add-watch (:state config) (or target guid)
+                   (fn [_ _ _ _]
+                     (swap! state update-in [:t] inc)))
+        (parsef)
+        (when-let [sel (db/get-query (or (and target @ret) root-class))]
+          (let [env  (to-env config)
+                snds (gather-sends env sel (:remotes config))]
+            (when-not (empty? snds)
+              (when-let [send (:send config)]
+                (send snds
+                      (fn send-cb
+                        ([resp]
+                         (merge! this resp nil)
+                         (renderf ((:parser config) env sel)))
+                        ([resp query]
+                         (merge! this resp query)
+                         (renderf ((:parser config) env sel)))
+                        ([resp query remote]
+                         (when-not (nil? remote)
+                           (p/queue! this (keys resp) remote))
+                         (merge! this resp query remote)
+                         (p/reconcile! this remote))))))))
+        @ret)))
+
+  (remove-root! [_ target]
+    (when-let [remove (:remove @state)]
+      (remove)))
+
+  (reindex! [this]
+    (let [root (get @state :root)]
+      (when (com/iquery? root)
+        (let [indexer (:indexer config)
+              c (first (get-in @indexer [:class->components root]))]
+          (p/index-root indexer (or c root))))))
+
+  (queue! [this ks]
+    (p/queue! this ks nil))
+  (queue! [_ ks remote]
+    (if-not (nil? remote)
+      (swap! state update-in [:remote-queue remote] into ks)
+      (swap! state update-in [:queue] into ks)))
+
+  (queue-sends! [_ sends]
+    (swap! state update-in [:queued-sends]
+           (:merge-sends config) sends))
+
+  (schedule-render! [_]
+    (if-not (:queued @state)
+      (do
+        (swap! state assoc :queued true)
+        true)
+      false))
+
+  (schedule-sends! [_]
+    (if-not (:sends-queued @state)
+      (do
+        (swap! state assoc :sends-queued true)
+        true)
+      false))
+
+  (reconcile! [this]
+    (p/reconcile! this nil))
+  ;; TODO: need to reindex roots after reconcilation
+  (reconcile! [this remote]
+    (let [st @state
+          q (if-not (nil? remote)
+              (get-in st [:remote-queue remote])
+              (:queue st))]
+      (swap! state update-in [:queued] not)
+      (if (not (nil? remote))
+        (swap! state assoc-in [:remote-queue remote] [])
+        (swap! state assoc :queue []))
+      (if (empty? q)
+        ;; TODO: need to move root re-render logic outside of batching logic
+        ((:render st))
+        (let [cs (transduce
+                   (map #(p/key->components (:indexer config) %))
+                   #(into %1 %2) #{} q)
+              {:keys [ui->props]} config
+              env (to-env config)
+              root (:root @state)]))))
+
+  (send! [this]
+    (let [sends (:queued-sends @state)]
+      (when-not (empty? sends)
+        (swap! state
+               (fn [state]
+                 (-> state
+                     (assoc :queued-sends {})
+                     (assoc :sends-queued false))))
+        ((:send config) sends
+          (fn send-cb
+            ([resp]
+             (merge! this resp nil))
+            ([resp query]
+             (merge! this resp query))
+            ([resp query remote]
+             (when-not (nil? remote)
+               (p/queue! this (keys resp) remote))
+             (merge! this resp query remote)
+             (p/reconcile! this remote))))))))
 
 
 

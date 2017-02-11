@@ -42,8 +42,7 @@
 
 (defn recursion?
   [x]
-  (or #?(:clj (= '... x)
-         :cljs (symbol-identical? '... x))
+  (or (= '... x)
       (number? x)))
 
 (defn mutation?
