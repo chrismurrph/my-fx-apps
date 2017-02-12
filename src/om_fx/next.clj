@@ -10,6 +10,7 @@
            (om_fx.next.reconciler Reconciler)))
 
 (def props com/props)
+(def factory rec/factory)
 
 (def ^:private roots (atom {}))
 (def ^{:dynamic true} *raf* nil)
@@ -262,7 +263,9 @@
            prune-tree   rec/default-extract-errors
            optimize     (fn [cs] (sort-by depth cs))
            history      100
-           root-render  (fn [c target] c)
+           root-render  (fn [c target]
+                          (println (str "Need do root render of " c " onto " target))
+                          c)
            root-unmount (fn [x])
            pathopt      false
            migrate      rec/default-migrate

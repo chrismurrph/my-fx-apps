@@ -1,6 +1,13 @@
 (ns om-fx.util
   (:refer-clojure :exclude [ident?]))
 
+(defn probe-off [x]
+  x)
+
+(defn probe-on [x]
+  (println  (str "probe: " x ", type: " (type x)))
+  x)
+
 (defn force-children [x]
   (cond->> x
     (seq? x) (into [] (map force-children))))

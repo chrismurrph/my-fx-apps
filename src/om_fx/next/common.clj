@@ -5,7 +5,7 @@
   "Returns true if the argument is an Om component."
   [x]
   (if-not (nil? x)
-    (or (instance? p/IReactComponent x)
+    (or (instance? om_fx.next.protocols.IReactComponent x)
         (satisfies? p/IReactComponent x))
     false))
 

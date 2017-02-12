@@ -4,7 +4,8 @@
             [fn-fx.diff :refer [component defui-fx render]]
             [om-fx.next :as om :refer [defui]]
             [fn-fx.controls :as controls]
-            [fn-fx.fx-dom :as fx-dom])
+            [fn-fx.fx-dom :as fx-dom]
+            [om-fx.util :as u])
   (:import [javafx.animation TranslateTransition ParallelTransition Timeline]
            [javafx.util Duration]))
 
@@ -67,24 +68,100 @@
                                                  :path [:csv :first-row-headers]})
                                    (controls/button
                                      :text "Reset"
-                                     :on-action {:event :reset})]))))
+                                     :on-action {:event :reset})
+                                   (controls/button
+                                     :text "Replace"
+                                     :on-action {:event :replace})]))))
+
+#_(defui MyCounter
+       Object
+       (render [this]
+               (let [{:keys [count]} (om/props this)]
+                 (controls/button
+                   :text "Counter"
+                   :on-action {:event :wont-work}))))
+#_(def my-counter (om/factory MyCounter))
+
+(defui-fx MyCounter
+          (render [this {:keys [] :as state}]
+                  (controls/button
+                    :text "Counter"
+                    :on-action {:event :replace})))
+
+(def om-app-state (atom {:count 0}))
+
+(def reconciler
+  (om/reconciler {:state om-app-state}))
+
+(defui MyOmCounter
+       Object
+       (render [this]
+               (let [{:keys [count]} (om/props this)]
+                 (println (str "To render: " count))
+                 (controls/button
+                   :text "Counter"
+                   :on-action {:event :replace}))))
+
+(defn -main-3 []
+  ;(events-driver #(main-stage %))
+  (om/add-root! reconciler
+                MyOmCounter (fn [] (assert false "Don't need a root"))))
+
+(defui-fx EmptyControl
+          (render [this {:keys [] :as state}]
+                  (controls/label
+                    :text "")))
+
+(def my-stage (atom nil))
+
+(defn create-stage [button-text replaced-mode]
+  (let [the-stage (controls/stage
+                    :shown true
+                    :title (str "JavaFX Scene Graph Demo, replaced: " replaced-mode)
+                    :scene (controls/scene
+                             :fill black
+                             :width 500
+                             :height 500
+                             :root (case replaced-mode
+                                     :counter (my-counter)
+                                     :test (u/probe-on (test-control {:button-text button-text}))
+                                     :nothing (empty-control))))]
+    (reset! my-stage the-stage)
+    the-stage))
 
 (defui-fx MainStage
-       (render [this {:keys [button-text] :as state}]
-               (controls/stage
-                 :shown true
-                 :title (str "JavaFX Scene Graph Demo")
-                 :scene (controls/scene
-                          :fill black
-                          :width 500
-                          :height 500
-                          :root (test-control {:button-text button-text})))))
+       (render [this {:keys [button-text replaced-mode] :as state}]
+               (create-stage button-text replaced-mode)))
 
 (def initial-state
   {:button-text "Initially"
-   :times-pressed 0})
+   :times-pressed 0
+   :replaced-mode :nothing})
 
 (defonce data-state (atom initial-state))
+
+(defn reset []
+  (reset! data-state initial-state))
+
+;;
+;; This is what assignment of root could do
+;;
+(defn give-life-1 []
+  (swap! data-state assoc :replaced-mode :test))
+
+;;
+;; does not work b/c stage is not map, so can't :scene on it
+;;
+(defn give-life-2 []
+  (reset! my-stage (create-stage "some text" :test))
+  (println (str "stage is a " (type @my-stage)))
+  (swap! my-stage assoc-in [:scene :root] (test-control {:button-text "Anything"})))
+
+;;
+;; works fine b/c :scsns exists in a map!
+;;
+(defn give-life-3 []
+  (swap! (atom {:scene {:root nil}}) assoc-in [:scene :root] (test-control {:button-text "Anything"})))
 
 (defmulti handle-event (fn [_ {:keys [event]}]
                          event))
@@ -99,6 +176,11 @@
   [state {:keys [_]}]
   initial-state)
 
+(defmethod handle-event :replace
+  [state {:keys [_]}]
+  (update state :replaced-mode {:counter :test
+                                :test :counter}))
+
 ;(defui HelloWorld
 ;       Object
 ;       (render [this]
@@ -106,38 +188,26 @@
 ;
 ;(def hello (om/factory HelloWorld))
 
-(def app-state (atom {:count 0}))
-
-(defui MyCounter
-       Object
-       (render [this]
-               (let [{:keys [count]} (om/props this)]
-                 (test-control {:button-text "Some button"}))))
-
-(def reconciler
-  (om/reconciler {:state app-state}))
-
-(defn -main-3 []
-  (om/add-root! reconciler
-                MyCounter (gdom/getElement "app")))
+(defn events-driver [main-stage-fn]
+  (let [handler-fn (fn [event]
+                     (println event)
+                     (try
+                       (swap! data-state handle-event event)
+                       (catch Throwable exception
+                         (println exception))))
+        ui-state (agent (fx-dom/app (main-stage-fn @data-state) handler-fn))]
+    (add-watch data-state :ui (fn [_ _ _ _]
+                                (send ui-state
+                                      (fn [old-ui]
+                                        (println "-- State Updated --")
+                                        (println @data-state)
+                                        (fx-dom/update-app old-ui (main-stage-fn @data-state))))))))
 
 (defn -main-2
   ([] (-main-2 {:button-text "Press me!"}))
   ([{:keys [button-text]}]
    (swap! data-state assoc :button-text button-text)
-    (let [handler-fn (fn [event]
-                       (println event)
-                       (try
-                         (swap! data-state handle-event event)
-                         (catch Throwable exception
-                           (println exception))))
-          ui-state (agent (fx-dom/app (main-stage @data-state) handler-fn))]
-      (add-watch data-state :ui (fn [_ _ _ _]
-                                  (send ui-state
-                                        (fn [old-ui]
-                                          (println "-- State Updated --")
-                                          (println @data-state)
-                                          (fx-dom/update-app old-ui (main-stage @data-state)))))))))
+    (events-driver #(main-stage %))))
 
 (defn -main-1 []
   (let [u (ui/stage

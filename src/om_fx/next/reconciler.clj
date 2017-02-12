@@ -10,7 +10,7 @@
             [om-fx.next.treedb :as treedb])
   (:import (om_fx.next.common Ident)
            (clojure.lang IDeref)
-           (om_fx.next.treedb IQuery)))
+           (om_fx.next.common IQuery)))
 
 (defn- recursive-class-path?
   "Returns true if a component's classpath is recursive"
@@ -606,6 +606,7 @@
     (let [ret   (atom nil)
           rctor (factory root-class)
           guid  (java.util.UUID/randomUUID)]
+      (println (str "factory returned: " rctor ", config is: " (:root-render config)))
       (when (com/iquery? root-class)
         (p/index-root (:indexer config) root-class))
       (when (and (:normalize config)
@@ -615,6 +616,8 @@
           (reset! (:state config) (merge new-state refs))
           (swap! state assoc :normalized true)))
       (let [renderf (fn [data]
+                      (println (str "In render fn with " data))
+                      ((:root-render config) (rctor data) target)
                       (binding [*reconciler* this
                                 *shared*     (merge
                                                (:shared config)

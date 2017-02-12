@@ -197,7 +197,8 @@
 (defn reconciler?
   "Returns true if x is a reconciler."
   [x]
-  (or (instance? p/IReconciler x)
+  (println (str "x: " x))
+  (or (instance? om_fx.next.protocols.IReconciler x)
       (satisfies? p/IReconciler x)))
 
 (defn get-indexer
